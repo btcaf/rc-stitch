@@ -17,7 +17,21 @@ def load_images(folder_path: str) -> list[np.ndarray]:
 ### TASK 1 FUNCTIONS ###
 
 
-def calibrate_camera_separate(images: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+def calibrate_and_compute_error(obj_points: np.ndarray, all_corners: np.ndarray, gray: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.float64]:
+    _, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(obj_points, all_corners, gray.shape[::-1], None, None)
+
+    error = 0
+    for i in range(len(obj_points)):
+        img_points, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs)
+        img_points = img_points.reshape(-1, 2)
+        error += cv2.norm(all_corners[i], img_points, cv2.NORM_L2) / len(img_points)
+
+    error /= len(obj_points)
+
+    return camera_matrix, dist_coeffs, error
+
+
+def calibrate_camera_separate(images: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.float64]:
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_16h5)
     parameters = cv2.aruco.DetectorParameters()
     detector = cv2.aruco.ArucoDetector(dictionary, parameters)
@@ -39,17 +53,7 @@ def calibrate_camera_separate(images: list[np.ndarray]) -> tuple[np.ndarray, np.
             all_corners.append(marker_corners.reshape(4, 2).astype(np.float32))
             obj_points.append(objp)
 
-    _, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(obj_points, all_corners, gray.shape[::-1], None, None)
-
-    error = 0
-    for i in range(len(obj_points)):
-        img_points, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs)
-        img_points = img_points.reshape(-1, 2)
-        error += cv2.norm(all_corners[i], img_points, cv2.NORM_L2) / len(img_points)
-
-    error /= len(obj_points)
-
-    return camera_matrix, dist_coeffs, error
+    return calibrate_and_compute_error(obj_points, all_corners, gray)
 
 
 def get_together_obj_points(ids):
@@ -91,17 +95,7 @@ def calibrate_camera_together(images: list[np.ndarray]) -> tuple[np.ndarray, np.
         obj_points.append(get_together_obj_points(ids.flatten()))
 
 
-    _, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(obj_points, all_corners, gray.shape[::-1], None, None)
-
-    error = 0
-    for i in range(len(obj_points)):
-        img_points, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs)
-        img_points = img_points.reshape(-1, 2)
-        error += cv2.norm(all_corners[i], img_points, cv2.NORM_L2) / len(img_points)
-
-    error /= len(obj_points)
-
-    return camera_matrix, dist_coeffs, error
+    return calibrate_and_compute_error(obj_points, all_corners, gray)
 
 
 def undistort_images(images: list[np.ndarray], camera_matrix: np.ndarray, dist_coeffs: np.ndarray) -> list[np.ndarray]:
@@ -120,8 +114,9 @@ def undistort_images(images: list[np.ndarray], camera_matrix: np.ndarray, dist_c
 ### TASK 2 FUNCTIONS ###
 
 
-def transform_image(img: np.ndarray, homography: np.ndarray, img_to_pad: np.ndarray, display: bool = False) -> tuple[np.ndarray, np.ndarray, np.float32, np.float32]:
-    print(img.shape)
+def transform_image(img: np.ndarray, homography: np.ndarray, img_to_pad: np.ndarray = None, display: bool = False) -> tuple[np.ndarray, np.ndarray, np.float32, np.float32]:
+    if img_to_pad is None:
+        img_to_pad = img
     dst_bounds = np.array([homography.dot(np.array([x, y, 1])) for x, y in itertools.product([0, img.shape[1]], [0, img.shape[0]])])
     dst_bounds = dst_bounds / dst_bounds[:, 2].reshape(-1, 1)
     dst_bounds = dst_bounds[:, :2]
@@ -149,7 +144,6 @@ def transform_image(img: np.ndarray, homography: np.ndarray, img_to_pad: np.ndar
         
         src_coords /= src_coords[2]
         src_coords = src_coords[:2]
-        # print(x, y, src_coords)
 
         src_coords = np.round(src_coords).astype(int)
         if 0 <= src_coords[0] < img.shape[1] and 0 <= src_coords[1] < img.shape[0]:
@@ -158,17 +152,14 @@ def transform_image(img: np.ndarray, homography: np.ndarray, img_to_pad: np.ndar
                 if img.shape[2] == 4 \
                 else np.append(img[src_coords[1], src_coords[0]], 1)
 
-    # move original wrt new bounds
     img_to_pad = cv2.cvtColor(img_to_pad, cv2.COLOR_BGR2BGRA)
     new_img = np.zeros((total_shape[0], total_shape[1], 4), dtype=np.uint8)
-    # print(total_min_x, total_min_y, total_shape, img_to_pad.shape)
     new_img[-total_min_y:(img_to_pad.shape[0] - total_min_y), -total_min_x:(img_to_pad.shape[1] - total_min_x)] = img_to_pad
 
     if display:
         cv2.imshow("original", new_img)
         cv2.imshow("dst", dst)
         cv2.waitKey(0)
-        cv2.destroyAllWindows()
     
     return dst, new_img, total_min_x, total_min_y
 
@@ -259,13 +250,11 @@ def local_correction_coeff(img1: np.ndarray, img2: np.ndarray, common_points: np
 
 
 def global_correction_coeff(local_coeffs: np.ndarray) -> np.ndarray:
-    print(local_coeffs)
     return np.sum(local_coeffs, axis=0) / np.sum(local_coeffs ** 2, axis=0)
 
 
 def apply_correction(img: np.ndarray, local_coeffs: np.ndarray, global_coeffs: np.ndarray, gamma: np.float32) -> np.ndarray:
     new_img = img.copy()
-    print("bbbbb", global_coeffs, "aaaaa", local_coeffs)
     new_img[:, :, :3] = np.minimum((global_coeffs * local_coeffs) ** (1 / gamma) * img[:, :, :3], 255)
     return new_img
 
@@ -286,22 +275,8 @@ def stitch_corrected_images(img1: np.ndarray, img2: np.ndarray, common_points: n
 
     for i in range(first + 1, dp_table.shape[0]):
         minima = np.minimum(dp_table[i - 1], np.roll(dp_table[i - 1], 1), np.roll(dp_table[i - 1], -1))
-        # minima[minima == np.inf] = 0
         dp_table[i] = pixel_cost(img1[i], img2[i]) + minima
         dp_table[i][~common_points[i]] = np.inf
-
-    # cv2.imshow("1", img1)
-    # cv2.imshow("2", img2)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-    # plt.imshow(common_points)
-    # plt.show()
-    # plt.imshow(img1[:, :, 3])
-    # plt.show()
-    # plt.imshow(img2[:, :, 3])
-    # plt.show()
-    # plt.imshow(dp_table)
-    # plt.show()
 
     sewing_line = []
     last_min_idx = None
@@ -311,32 +286,24 @@ def stitch_corrected_images(img1: np.ndarray, img2: np.ndarray, common_points: n
         if last_min_idx == None:
             last_min_idx = np.argmin(dp_table[i])
             sewing_line.append((i, last_min_idx))
-        # print(i, last_min_idx)
-        # print(dp_table.shape)
+
         last_min_idx = np.argmin(dp_table[i, max(last_min_idx - 1, 0):min(last_min_idx + 2, dp_table.shape[1])]) + max(last_min_idx - 1, 0)
         if dp_table[i, last_min_idx] == np.inf:
             break
         sewing_line.append((i, last_min_idx))
     
     sewing_line = list(reversed(sewing_line))
-    # print("Line", list(sewing_line))
 
-    new_img = img1 + img2 # TODO test
+    new_img = img1 + img2
     new_img[:, :, 3] = np.logical_or(img1[:, :, 3], img2[:, :, 3]).astype(np.uint8) * 255
 
     for i, j in sewing_line:
-        # print(i, j)
-        # new_img[i, :j, :3] = img2[i, :j, :3] # TODO test
         if is_reverse:
             new_img[i, :j, :3] = img1[i, :j, :3]
             new_img[i, j:, :3] = img2[i, j:, :3]
         else:
             new_img[i, :j, :3] = img2[i, :j, :3]
             new_img[i, j:, :3] = img1[i, j:, :3]
-
-    # for i, j in sewing_line:
-    #     new_img[i, j] = [0, 0, 255, 1]
-        # print(i, j, new_img[i, j])
 
     return new_img
 
@@ -347,13 +314,10 @@ def stitch_images(img1: np.ndarray, img2: np.ndarray, gamma: np.float32, pairs: 
     common_points = get_common_points(img1, img2)
     local_coeffs = local_correction_coeff(img1, img2, common_points, gamma)
     global_coeffs = global_correction_coeff(local_coeffs)
+    img1 = apply_correction(img1, np.array([1, 1, 1]), global_coeffs, gamma)
     img2 = apply_correction(img2, local_coeffs, global_coeffs, gamma)
     res = stitch_corrected_images(img1, img2, common_points, is_reverse)
 
-    # cv2.imshow("stitched", res)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-    show_images([img1, img2, res])
     return res
 
 
@@ -403,6 +367,19 @@ def get_transformed_images_ransac(src: np.ndarray, dst: np.ndarray, pairs: list[
     return src_new, dst_new, shift_x, shift_y
 
 
+def stich_images_superglue(img1: np.ndarray, img2: np.ndarray, gamma: np.float32, is_reverse: bool, path: str) -> np.ndarray:
+    pairs = get_pairs(path)
+    img1, img2, _, _ = get_transformed_images_ransac(img1, img2, pairs)
+    common_points = get_common_points(img1, img2)
+    local_coeffs = local_correction_coeff(img1, img2, common_points, gamma)
+    global_coeffs = global_correction_coeff(local_coeffs)
+    img1 = apply_correction(img1, np.array([1, 1, 1]), global_coeffs, gamma)
+    img2 = apply_correction(img2, local_coeffs, global_coeffs, gamma)
+    res = stitch_corrected_images(img1, img2, common_points, is_reverse)
+
+    return res
+
+
 ### TASK 7 FUNCTIONS ###
 
 
@@ -420,125 +397,120 @@ def get_pairs_auto(images: list[np.ndarray]) -> list[list[list[list[int]]]]:
             "--input_pairs", "tmp/pairs.txt" , 
             "--input_dir", "tmp", 
             "--output_dir", "tmp", 
-            "--resize", "1280", "720"
+            "--resize", "1280", "720",
+            "--viz"
          ]
     )
     pairs = [get_pairs(f"tmp/img{i}_img{i + 1}_matches.npz") for i in range(len(images) - 1)]
-    os.system("rm -r tmp")
+    subprocess.run(["rm", "-r", "tmp"])
     return pairs
-
-
-def stitch_all(images: list[np.ndarray], is_reverse: bool, shift_x: np.float32=0, shift_y: np.float32=0, gamma: np.float32=2.2) -> tuple[np.ndarray, np.float32, np.float32]:
-    all_pairs = get_pairs_auto(images)
-
-    # find local coefficients
-    local_coeffs = [np.array([1, 1, 1])]
-    for i in range(len(images) - 1):
-        img1, img2 = images[i], images[i + 1]
-        img1, img2, _, _ = get_transformed_images(img1, img2, all_pairs[i])
-        common_points = get_common_points(img1, img2)
-        local_coeffs.append(local_correction_coeff(img1, img2, common_points, gamma))
-
-    # find global coefficients
-    global_coeffs = global_correction_coeff(np.array(local_coeffs))
-
-    # apply correction
-    corrected_images = []
-    for i in range(len(images)):
-        corrected_images.append(apply_correction(images[i], local_coeffs[i], global_coeffs, gamma))
-
-    stitched = corrected_images[0]
-    for i in range(1, len(images)):
-        # transform
-        img1, img2 = stitched, corrected_images[i]
-        img1, img2, shift_x, shift_y = get_transformed_images(img1, img2, all_pairs[i - 1], shift_x, shift_y)
-        common_points = get_common_points(img1, img2)
-        stitched = stitch_corrected_images(img1, img2, common_points, is_reverse)
-
-    return stitched, shift_x, shift_y
 
 
 # run with SuperGluePretrainedNetwork in the working directory
 def stitch_all_median(images: list[np.ndarray], gamma: np.float32) -> np.ndarray:
     median = len(images) // 2
-    first_half_pairs = get_pairs_auto(images[:median + 1])
-    second_half_pairs = get_pairs_auto(list(reversed(images[median:])))
     all_pairs = get_pairs_auto(images)
+    first_half_pairs = all_pairs[:median]
+    second_half_pairs = get_pairs_auto(list(reversed(images[median:])))
 
-    # find local coefficients
     local_coeffs = [np.array([1, 1, 1])]
     for i in range(len(images) - 1):
         img1, img2 = images[i], images[i + 1]
-        img1, img2, _, _ = get_transformed_images(img1, img2, all_pairs[i])
+        img1, img2, _, _ = get_transformed_images_ransac(img1, img2, all_pairs[i])
         common_points = get_common_points(img1, img2)
         local_coeffs.append(local_correction_coeff(img1, img2, common_points, gamma))
 
-    # find global coefficients
     global_coeffs = global_correction_coeff(np.array(local_coeffs))
 
-    # apply correction
     corrected_images = []
     for i in range(len(images)):
         corrected_images.append(apply_correction(images[i], local_coeffs[i], global_coeffs, gamma))
-    # corrected_images = images
 
-
-    # stitch images
     stitched = corrected_images[0]
     shift_x, shift_y = 0, 0
-    # TODO debug code
-    all_stitched = [stitched]
-    # for i in range(1, median + 1):
     for i in range(1, median + 1):
-        # transform
         img1, img2 = stitched, corrected_images[i]
-        img1, img2, shift_x, shift_y = get_transformed_images(img1, img2, first_half_pairs[i - 1], shift_x, shift_y)
+        img1, img2, shift_x, shift_y = get_transformed_images_ransac(img1, img2, first_half_pairs[i - 1], shift_x, shift_y)
         common_points = get_common_points(img1, img2)
         stitched = stitch_corrected_images(img1, img2, common_points, False)
-        # all_stitched.append(stitched)
-    # show_images([stitched])
 
     stitched2 = corrected_images[-1]
     shift_x2, shift_y2 = 0, 0
     for i in range(len(corrected_images) - 2, median, -1):
-        # transform
         img1, img2 = stitched2, corrected_images[i]
-        img1, img2, shift_x2, shift_y2 = get_transformed_images(img1, img2, second_half_pairs[i - median], shift_x2, shift_y2)
+        img1, img2, shift_x2, shift_y2 = get_transformed_images_ransac(img1, img2, second_half_pairs[i - median], shift_x2, shift_y2)
         common_points = get_common_points(img1, img2)
         stitched2 = stitch_corrected_images(img1, img2, common_points, True)
-        # all_stitched.append(stitched)
 
-    # stitch the two halves
     if second_half_pairs:
         img1, img2 = stitched2, stitched
-        img1, img2, shift_x, shift_y = get_transformed_images(img1, img2, second_half_pairs[0], shift_x2 - shift_x, shift_y2 - shift_y)
+        img1, img2, shift_x, shift_y = get_transformed_images_ransac(img1, img2, second_half_pairs[0], shift_x2 - shift_x, shift_y2 - shift_y)
         common_points = get_common_points(img1, img2)
         stitched = stitch_corrected_images(img1, img2, common_points, True)
-    show_images([stitched])
-    # median = len(images) // 2
-    # first_half_stitched, shift_x_first, shift_y_first = stitch_all(images[:median + 1], False, 0, 0, gamma)
-    # second_half_stitched, shift_x_second, shift_y_second = stitch_all(list(reversed(images[median:])), True, 0, 0, gamma)
-    # stitched, _, _ = stitch_all([second_half_stitched, first_half_stitched], True, shift_x_second - shift_x_first, shift_y_second - shift_y_first, gamma)
-    # show_images([stitched])
 
-    # show_images([img for img in corrected_images] + [stitched])
-
+    return stitched
 
 
 ### MAIN ###
 
 
 def main():
+    ## TASK 1 ##
+
+    print("Task 1:")
     calibration_images = load_images("calibration")
+    print("Calibrating camera by using separate tags")
+    _, _, err = calibrate_camera_separate(calibration_images)
+    print("Reprojection error:", err)
+
+    print("Calibrating camera by using all tags together")
     camera_matrix, dist_coeffs, err = calibrate_camera_together(calibration_images)
+    print("Reprojection error:", err)
+
+    ## TASK 2 ##
+
+    print("Task 2 example:")
+    transform_image(calibration_images[0], np.array([[0.7, -0.7, 0], [0.7, 0.7, 0], [0, 0, 1]]), img_to_pad=None, display=True)
+    cv2.destroyAllWindows()
+
+    ## TASK 3 ##
+
+    test_compute_homography()
+    print("Task 3 tests passed")
+
+    ## TASK 4 ##
     
+    # nothing to show here
+
+    ## TASK 5 ##
+    
+    print("Task 5:")
     stiching_images = load_images("stitching")
     undistorted_images = undistort_images(stiching_images, camera_matrix, dist_coeffs)
-    first_two = undistorted_images[:2]
-    pairs = get_pairs("img1_img2_matches.npz")
-    # stitch_images(first_two[0], first_two[1], 2.0, pairs)
-    stitch_all_median(undistorted_images[:5], 2.2)
-    # stitch_images(first_two[0], first_two[1], 2.0, PAIRS)
+
+    stitched_image = stitch_images(undistorted_images[0], undistorted_images[1], 2.2, PAIRS, False)
+    cv2.imshow("Task 5", stitched_image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    cv2.imwrite("task_5_stitched.jpg", stitched_image)
+
+    ## TASK 6 ##
+
+    print("Task 6:")
+    stitched_image = stich_images_superglue(undistorted_images[0], undistorted_images[1], 2.2, False, "img1_img2_matches.npz")
+    cv2.imshow("Task 6", stitched_image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    cv2.imwrite("task_6_stitched.jpg", stitched_image)
+
+    # ## TASK 7 ##
+
+    print("Task 7:")
+    stiched_image = stitch_all_median(undistorted_images[:5], 2.2)
+    cv2.imshow("Task 7", stiched_image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    cv2.imwrite("task_7_stitched.jpg", stiched_image)
 
 if __name__ == "__main__":
     main()
