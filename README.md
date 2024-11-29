@@ -3,7 +3,7 @@
 Version of Python used: 3.11.4
 
 Code can be run by running ```python stitch.py``` in the terminal. The main function showcases each task one after the other.
-(other than Task 4).
+(other than Task 4). The folders calibration and stitching should be in the working directory, and for Task 7 - the cloned SuperGlue repository.
 
 ### Task 1
 The reprojection error was unusually smaller when considering each tag separatly, however, as expected, in practice the undistorted images were better if all tags where considered at once (as we have more information to work with). Here is an example of a straight line in an image undistorted in both cases (the first calibration image, I used it for this example because it has a long straight line that was originally quite distorted):
